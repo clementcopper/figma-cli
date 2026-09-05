@@ -1,28 +1,27 @@
 import Foundation
 
-/// The display name a panel tab starts Claude Code with (`claude -n <name>`), and the session id
-/// it hands to `--session-id`.
+/// The display name a panel tab starts Claude Code with (`claude -n <name>`), and the one it is
+/// renamed to once the task is known.
 ///
 /// Several Claudes run at once on this machine and the `/resume` picker shows them side by side,
-/// so a name has to say both "this one is the panel" and "this one was working on X". The old
-/// format `figma-claude:<file>` said only that much — and said it again for every tab on the same
-/// file, for every Restart, and after every app launch. Four sessions ended up named
-/// `figma-claude:Designdone`.
+/// so a name has to say "this one is the panel" and what it was doing. Claude Code names its own
+/// sessions after the working directory first and after the task a few turns later; a name set
+/// with `-n` is never touched again — which is why the old `fc-<file>-<uuid8>` stayed cryptic for
+/// the life of a session. (The uuid was in the name so the `/resume` row pointed at its own
+/// transcript. `--session-id` is still minted by the host; the name no longer carries it.)
 ///
-/// So the name carries the session's own id: `fc-<file slug>-<first 8 of the uuid>`. The host
-/// mints the uuid, passes it as `--session-id`, and the name then points at the real
-/// `~/.claude/projects/<slug>/<uuid>.jsonl` rather than merely looking unique.
+/// Two stages now: `fc-<file>-<page>` at start, `fc-<word>-<word>` after the first prompt (see
+/// `TaskWords.swift` and the renamer in the app). Every name is handed out once, ever — checked
+/// against the running sessions and the host's ledger (`SessionLedger.swift`), a collision gets
+/// `-2`, `-3`, …
 ///
-/// The Figma file still wins over the working directory — two tabs on the same project are the
-/// normal case, and now they are told apart by the id rather than by the file name.
-///
-/// `app/src/lib/session-name.ts` (the Electron host) deliberately stays on the old format; it is
-/// not the app that runs. The two are no longer expected to match.
+/// `app/src/lib/session-name.ts` (the Electron host) deliberately stays on its old format; it is
+/// not the app that runs.
 
 /// Prefix every panel session carries.
 public let sessionNamePrefix = "fc"
 
-/// Long names are truncated in the prompt box anyway; this keeps the slug readable there.
+/// Long names are truncated in the prompt box anyway; this keeps each piece readable there.
 private let maxSuffix = 40
 
 /// The daemon reports the browser page title, which Figma suffixes with " – Figma". In a name
@@ -66,24 +65,36 @@ public func sessionSlug(_ raw: String) -> String {
     return out
 }
 
-/// The first block of a uuid — enough to find the session file, short enough for the prompt box.
-public func shortSessionId(_ uuid: String) -> String {
-    String(uuid.trimmingCharacters(in: .whitespaces).prefix(8)).lowercased()
+/// The start name: the Figma file and the page it is on, the working directory when no file is
+/// known yet, the bare prefix when nothing is. A page without a file says nothing on its own.
+public func panelSessionName(file: String? = nil, page: String? = nil, cwd: String? = nil) -> String {
+    var parts = [sessionNamePrefix]
+    let fileSlug = sessionSlug(cleanFileName(file))
+    if !fileSlug.isEmpty {
+        parts.append(fileSlug)
+        let pageSlug = sessionSlug(page ?? "")
+        if !pageSlug.isEmpty { parts.append(pageSlug) }
+    } else if let cwd {
+        // `basename("/")` is "/" and `basename("")` is "" — neither says anything about the
+        // session, and both slug to nothing anyway.
+        let trimmed = cwd.trimmingCharacters(in: .whitespaces)
+        let dir = sessionSlug((trimmed as NSString).lastPathComponent)
+        if !dir.isEmpty { parts.append(dir) }
+    }
+    return parts.joined(separator: "-")
 }
 
-public func panelSessionName(file: String? = nil, cwd: String? = nil,
-                             sessionId: String = "") -> String {
-    var middle = sessionSlug(cleanFileName(file))
+/// `base` if nobody has it, else `base-2`, `base-3`, … — the first that is free.
+public func uniqueName(_ base: String, taken: Set<String>) -> String {
+    if !taken.contains(base) { return base }
+    var n = 2
+    while taken.contains("\(base)-\(n)") { n += 1 }
+    return "\(base)-\(n)"
+}
 
-    // `basename("/")` is "/" and `basename("")` is "" — neither says anything about the session,
-    // and both slug to nothing anyway.
-    if middle.isEmpty, let cwd {
-        let trimmed = cwd.trimmingCharacters(in: .whitespaces)
-        middle = sessionSlug((trimmed as NSString).lastPathComponent)
-    }
-
-    let parts = [sessionNamePrefix, middle, shortSessionId(sessionId)].filter { !$0.isEmpty }
-    return parts.joined(separator: "-")
+/// The name after the first prompt: the prefix and the two task words.
+public func taskSessionName(words: String) -> String {
+    "\(sessionNamePrefix)-\(sessionSlug(words))"
 }
 
 /// Whether a spawn starts a conversation of its own, and so deserves a fresh name and id.
@@ -94,4 +105,19 @@ public func panelSessionName(file: String? = nil, cwd: String? = nil,
 public func startsANewSession(extraArgs: [String]) -> Bool {
     let adopting: Set<String> = ["--resume", "-r", "--continue", "-c"]
     return !extraArgs.contains { adopting.contains($0) }
+}
+
+/// Seconds of silence on the keyboard before the host may type into the prompt.
+public let injectionQuietSeconds: Double = 3
+
+/// `/rename` is typed into the user's own terminal, so every reason to hold back wins: Claude
+/// must be idle (Claude Code's registry says so), not showing a question of its own, and the
+/// user must not have typed for a moment — otherwise the command lands inside their sentence.
+public func shouldInject(status: String?, waiting: Bool, secondsSinceInput: Double) -> Bool {
+    status == "idle" && !waiting && secondsSinceInput > injectionQuietSeconds
+}
+
+/// The keystrokes for a rename: the slash command and Enter.
+public func renameCommand(_ name: String) -> String {
+    "/rename \(name)\r"
 }

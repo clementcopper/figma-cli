@@ -214,14 +214,22 @@ final class TerminalTab {
     /// with the counter, and a file left behind would reappear under a later tab.
     let id: String
     let spawnedAt = Date()
+    /// The `--session-id` this tab's conversation runs under; empty for `--resume`/`--continue`,
+    /// which adopt a session the host did not mint.
+    let sessionId: String
+    /// What Claude Code calls the session: the start name, then the task name once renamed.
+    var sessionName: String
 
     /// `id` is carried over when a tab is respawned: the status line is keyed on it, and a new
     /// one would point the row at a tab that no longer exists.
-    init(view: PanelTerminalView, name: String, cwd: String, id: String? = nil) {
+    init(view: PanelTerminalView, name: String, cwd: String, id: String? = nil,
+         sessionId: String = "", sessionName: String = "") {
         self.view = view
         self.name = name
         self.cwd = cwd
         self.id = id ?? "tab-\(UUID().uuidString.prefix(8))"
+        self.sessionId = sessionId
+        self.sessionName = sessionName
     }
 }
 
@@ -249,6 +257,24 @@ final class PanelWindowController: NSObject, LocalProcessTerminalViewDelegate, N
         }
     }
     private lazy var prompts = PromptDetector { [weak self] _, _ in self?.refreshTabBar() }
+    /// Types `/rename fc-<task>` into a fresh tab once its first prompt is known — see
+    /// `SessionRenamer.swift`. Built lazily: it needs `prompts` and the PATH of a panel shell.
+    private lazy var renamer: SessionRenamer = {
+        let config = PanelConfig.load()
+        let environment = panelEnvironment(config: config)
+        let path = environment["PATH"] ?? ""
+        return SessionRenamer(
+            prompts: prompts, claude: whichOnPath(config.command, path: path), path: path,
+            environment: environment,
+            tabFor: { [weak self] tabId, sessionId in
+                guard let tab = self?.state.tabs.first(where: { $0.id == tabId }),
+                      tab.sessionId == sessionId else { return nil }
+                return tab.view
+            },
+            onRenamed: { [weak self] tabId, name in
+                self?.state.tabs.first(where: { $0.id == tabId })?.sessionName = name
+            })
+    }()
     /// An action that touches the daemon or Figma is running; the menu is read-only until it ends.
     private var figmaBusy = false
     /// Whether the "should clear" toast has already fired for the current crossing of the
@@ -395,12 +421,13 @@ final class PanelWindowController: NSObject, LocalProcessTerminalViewDelegate, N
         watcher.waitForFirstPoll()
         let snapshot = watcher.snapshot
         let file = snapshot.file.isEmpty ? config.figmaFile : snapshot.file
-        // The id is minted here rather than left to Claude, so the name can carry it: the tab's
-        // row in the `/resume` picker then points at its own session file.
+        // The id is minted here rather than left to Claude: it is how the host finds the
+        // session's transcript and its registry row later, for the rename after the first prompt.
         let sessionId = UUID().uuidString.lowercased()
-        let sessionName = panelSessionName(file: file, cwd: cwd, sessionId: sessionId)
+        let sessionName = mintSessionName(file: file, page: snapshot.page, cwd: cwd)
         let name = state.nextName()
-        let tab = TerminalTab(view: makeTerminalView(), name: name, cwd: cwd)
+        let tab = TerminalTab(view: makeTerminalView(), name: name, cwd: cwd,
+                              sessionId: sessionId, sessionName: sessionName)
         let view = tab.view
         let environment = panelEnvironment(config: config, tabId: tab.id)
         view.onOutput = { [weak self] text in self?.prompts.onData(tab.id, text) }
@@ -422,7 +449,17 @@ final class PanelWindowController: NSObject, LocalProcessTerminalViewDelegate, N
         show(tab)
         start(view, executable: executable, args: args, environment: environment, cwd: cwd,
               command: config.command)
+        renamer.watch(tabId: tab.id, sessionId: sessionId, cwd: cwd)
         refreshTabBar()
+    }
+
+    /// A start name nobody has had: `fc-<file>-<page>`, made unique against the running sessions
+    /// and the ledger, and written to the ledger before `claude` starts.
+    private func mintSessionName(file: String, page: String, cwd: String) -> String {
+        let base = panelSessionName(file: file, page: page, cwd: cwd)
+        let name = uniqueName(base, taken: liveSessionNames().union(ledgerNames()))
+        recordName(name)
+        return name
     }
 
     /// Starts the tab's process — or, when the command is nowhere on the PATH, says so in the
@@ -470,6 +507,7 @@ final class PanelWindowController: NSObject, LocalProcessTerminalViewDelegate, N
         guard let removed = state.close(index) else { return }
         statusWatcher.forget(removed.id)
         prompts.forget(removed.id)
+        renamer.forget(removed.id)
         removed.view.terminate()
         removed.view.removeFromSuperview()
 
@@ -762,7 +800,7 @@ final class PanelWindowController: NSObject, LocalProcessTerminalViewDelegate, N
         // covers the recovery steps in `resumeRecoveryPlan()`, which come through here.
         let fresh = startsANewSession(extraArgs: extraArgs)
         let sessionId = fresh ? UUID().uuidString.lowercased() : ""
-        let sessionName = fresh ? panelSessionName(file: file, cwd: old.cwd, sessionId: sessionId) : ""
+        let sessionName = fresh ? mintSessionName(file: file, page: snapshot.page, cwd: old.cwd) : ""
         var args = panelArguments(config: config, sessionName: sessionName,
                                   sessionId: sessionId,
                                   statusLineCommand: Self.statusLineCommand)
@@ -773,16 +811,19 @@ final class PanelWindowController: NSObject, LocalProcessTerminalViewDelegate, N
         old.view.terminate()
         old.view.removeFromSuperview()
         prompts.forget(old.id)
+        renamer.forget(old.id)
 
         let view = makeTerminalView()
         view.onOutput = { [weak self] text in self?.prompts.onData(old.id, text) }
         view.onInput = { [weak self] in self?.prompts.onUserInput(old.id) }
 
-        let replacement = TerminalTab(view: view, name: old.name, cwd: old.cwd, id: old.id)
+        let replacement = TerminalTab(view: view, name: old.name, cwd: old.cwd, id: old.id,
+                                      sessionId: sessionId, sessionName: sessionName)
         state.replace(at: index, with: replacement)
         show(replacement)
         start(view, executable: executable, args: args, environment: environment, cwd: old.cwd,
               command: config.command)
+        if fresh { renamer.watch(tabId: old.id, sessionId: sessionId, cwd: old.cwd) }
         refreshTabBar()
     }
 

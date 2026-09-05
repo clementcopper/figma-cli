@@ -43,3 +43,5 @@ Distilled from `LEARNINGS.md` § Swift host. Stories and measurements there.
 - **Finding a command on PATH is not being able to run it.** The `figma-cli` shim does `exec node …`; hand the resolved PATH to every child (`runCli` in `FigmaActions.swift` does).
 - **A probe that stubs the thing under test proves nothing.** `--render-about` passed a fixed version and shipped the dialog broken; every stubbed input needs a second, non-visual probe (`--print-about`) that runs the real path.
 - **XCTest needs full Xcode;** with Command Line Tools only, the checks run as a plain executable target (`CoreChecks`).
+- **Text into the user's terminal only when Claude is idle, shows no question, and the keyboard has been quiet for 3 s** (`shouldInject`, `SessionRenamer.swift`); the registry row `~/.claude/sessions/<pid>.json` says busy or idle, the host finds it by `sessionId`.
+- **A session name is handed out once, ever:** registry ∪ ledger (`~/.figma-ds-cli/session-names.json`), written before `claude` starts; a collision gets `-2`.

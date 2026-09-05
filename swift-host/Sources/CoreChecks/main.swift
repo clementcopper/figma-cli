@@ -1,5 +1,7 @@
 // Runs the ported checks. `swift run CoreChecks` — exits non-zero on the first failing case.
 SessionNameTests.run()
+SessionLedgerTests.run()
+TaskWordsTests.run()
 ShellPathTests.run()
 FigmaStatusTests.run()
 PanelConfigTests.run()

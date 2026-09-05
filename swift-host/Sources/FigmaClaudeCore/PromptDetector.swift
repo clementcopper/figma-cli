@@ -85,6 +85,7 @@ public func looksLikePrompt(_ raw: String, patterns: [String] = defaultPromptPat
 public final class PromptDetector {
     private var buffers: [String: PromptBuffer] = [:]
     private var waiting: Set<String> = []
+    private var lastInput: [String: Date] = [:]
     private var pending: [String: DispatchWorkItem] = [:]
     private let showDelay: TimeInterval
     private let patterns: [String]
@@ -118,13 +119,22 @@ public final class PromptDetector {
     public func onUserInput(_ tabId: String) {
         pending[tabId]?.cancel()
         buffers[tabId]?.clear()
+        lastInput[tabId] = Date()
         set(tabId, waiting: false)
+    }
+
+    /// How long the keyboard has been quiet on this tab — infinite if it never spoke. The renamer
+    /// types into the prompt only after a pause, so its command cannot land inside a sentence.
+    public func secondsSinceInput(_ tabId: String) -> Double {
+        guard let at = lastInput[tabId] else { return .infinity }
+        return Date().timeIntervalSince(at)
     }
 
     public func forget(_ tabId: String) {
         pending[tabId]?.cancel()
         pending.removeValue(forKey: tabId)
         buffers.removeValue(forKey: tabId)
+        lastInput.removeValue(forKey: tabId)
         waiting.remove(tabId)
     }
 

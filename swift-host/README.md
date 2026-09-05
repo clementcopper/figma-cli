@@ -108,6 +108,26 @@ Two things to know before trusting one:
 | `Tools/width-check.sh` | black-box width check — print, then ask the terminal where the cursor is (`ESC[6n`) and compare against what a correct one must answer |
 | `Tools/repaint-bench.sh` | full-screen repaints in the shape Claude Code's streaming UI produces, which is not what `cat` of a file measures |
 
+## Session names
+
+A tab starts Claude Code as `claude -n fc-<file>-<page> --session-id <uuid>` — the bound Figma
+file and the page it is on (`fc-designdone-cli-lab`), the working directory when no file is known
+yet (`fc-design`), the bare `fc` when nothing is. Claude Code never touches a name set with `-n`,
+so the host renames the session itself once the task is known: when the first prompt appears in
+the transcript (`~/.claude/projects/<cwd key>/<uuid>.jsonl`), a Haiku call names it in two words
+in the prompt's own language, and `/rename fc-<w1>-<w2>` is typed into the tab
+(`SessionRenamer.swift`, rules in `SessionName.swift` and `TaskWords.swift`).
+
+Typing into somebody's terminal has conditions, all four at once: Claude Code's registry row
+(`~/.claude/sessions/<pid>.json`, found by `sessionId`) says `idle`, the prompt detector sees no
+question, the keyboard has been quiet for 3 s, and the tab still runs that session. The registry
+confirms the new name within 10 s; one retry, then the start name stays.
+
+Every name is handed out once, ever: checked against the running sessions and the host's ledger
+`~/.figma-ds-cli/session-names.json` (every name ever minted, written before `claude` starts); a
+collision gets `-2`, `-3`, … `--resume` and `--continue` adopt a session that has a name and are
+neither named nor renamed. The Electron host in `app/` stays on its old `figma-claude:<file>`.
+
 ## Reading further
 
 - [`../CLAUDE.md`](../CLAUDE.md) — the repo's own guide, including what must survive an upstream merge
